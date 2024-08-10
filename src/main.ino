@@ -21,64 +21,104 @@ const char* password = SECRET_WIFI_PASSWORD;  // Replace with your network passw
 IRrecv irrecv(kRecvPin);
 decode_results results;
 
-bool getVolumeCommand(decode_results* results) {
-  // Add your logic to check if the received signal is the "volume up" signal
-  // This will depend on your specific remote and IR signal pattern
-  switch (results->value) {
-    case (0x9C897A65):
-      return 0; // MUTE
-    case (0x94AFAA8C):
-    case (0xE49E3262):
-      return 1; // VOLUME UP
-    case (0xC1BFD92):
-      return -1; // VOLUME DOWN
-    default:
-      return NULL;
+int last_command = VOLUME_UNKNOWN;
+
+/**
+ * Uses the IRremoteESP8266 library to determine if we should volume up, down or mute.
+ */
+int getVolumeCommand(decode_results* results) {
+  const decode_type_t type = results->decode_type;
+  const int value = results->value;
+
+  if (type == decode_type_t::LG) {
+    if (value == 0x20DF40BF) {
+      return VOLUME_UP;
+    }
+    else if (value == 0x20DFC03F) {
+      return VOLUME_DOWN;
+    }
+    else if (value == 0x20DF906F) {
+      return VOLUME_MUTE;
+    }
   }
+
+  // My TV remote seems to be using NEC protocol, but key codes are different
+  if (value == 0x20DF40BF) {
+    return VOLUME_UP;
+  } else if (value == 0x20DFC03F) {
+    return VOLUME_DOWN;
+  } else if (value == 0x20DF906F) {
+    return VOLUME_MUTE;
+  } else if (value == 0x71B93203) {
+    // Sometimes the mute button triggers a 34 bit code
+    return VOLUME_MUTE;
+  } else if (value == 0x8EEF4B83) {
+    // Sometimes the volume down button triggers a 34 bit code
+    return VOLUME_DOWN;
+  } else if (value == 0x9E0A10FF) {
+    // Sometimes the volume up button triggers a 34 bit code
+    return VOLUME_UP;
+  }
+
+  return VOLUME_UNKNOWN;
 }
 
 void setup() {
   Serial.begin(115200);
 
-  Serial.print("Starting IR receiver... ");
+  Serial.print("[setup] Starting IR receiver... ");
   // Initialize IR Receiver
   irrecv.enableIRIn();
-  Serial.print("OK");
+  Serial.println("OK");
   // initialize digital pin LED_BUILTIN as an output.
   pinMode(LED_BUILTIN, OUTPUT);
 
   // Connect to WiFi
-  Serial.print("Connecting to ");
+  Serial.print("[setup] Connecting to ");
   Serial.println(ssid);
   WiFi.begin(ssid, password);
 
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
-    Serial.print(".");
+    Serial.print("@");
   }
 
   Serial.println("");
-  Serial.println("WiFi connected.");
-  Serial.print("IP address: ");
+  Serial.print("[setup] WiFi connected: ");
   Serial.println(WiFi.localIP());
+  // turn off the LED. commands seems to be inverted
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 
 void loop() {
 
   // Check if an IR signal is received
-  if (irrecv.decode(&results)) {
-    digitalWrite(LED_BUILTIN, LOW);  // turn the LED on (HIGH is the voltage level)
-    Serial.println("");
-    Serial.println(resultToHumanReadableBasic(&results));
-    irrecv.resume();  // Receive the next value
-    int command = getVolumeCommand(&results);
-    Serial.print("Will apply volume command: ");
-    Serial.println(command);
-    controlDevialetVolume(command);
-    delay(300);       // keep the LED on for some time
+  if (!irrecv.decode(&results)) {
+    // Zone out for a bit if no signal has been received
+    Serial.print(".");
+    delay(300);
+    return;
   }
-  digitalWrite(LED_BUILTIN, HIGH);  // turn the LED off by making the voltage LOW
-  Serial.print(".");
-  delay(300);
+
+  Serial.println("");
+  Serial.println(resultToHumanReadableBasic(&results));
+
+  int command = getVolumeCommand(&results);
+  bool shouldRepeatLastCommand = results.repeat;
+
+  irrecv.resume();  // Receive the next value
+
+  if (shouldRepeatLastCommand) {
+    Serial.println("[main] Repeating last command...");
+    command = last_command;
+  }
+
+  if (command == VOLUME_UNKNOWN) {
+    Serial.println("[main] Ignoring unknown command");
+   return;
+  }
+
+  controlDevialetVolume(command);
+  last_command = command;
 }
