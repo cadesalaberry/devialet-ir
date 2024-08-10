@@ -2,6 +2,7 @@
 #define DECODE_NEC 1         // Includes Apple and Onkyo
 
 #include <WiFi.h>
+#include <ESPmDNS.h>
 #include <IRremoteESP8266.h>
 #include <IRrecv.h>
 #include <IRutils.h>
@@ -13,13 +14,16 @@
 // Define the IR receiver pin
 // https://github.com/espressif/arduino-esp32/blob/master/variants/XIAO_ESP32C6/pins_arduino.h
 // Make sure we use the correct pin mapping for the ESP32-C6
-const uint16_t kRecvPin = 18; // D10
+
+const uint16_t kRecvPin = D10; // D10
 const char* ssid = SECRET_WIFI_NAME;          // Replace with your network SSID
 const char* password = SECRET_WIFI_PASSWORD;  // Replace with your network password
 
 // IR Receiver setup
 IRrecv irrecv(kRecvPin);
 decode_results results;
+String devialetIP = "";
+wl_status_t wifiStatus;
 
 int last_command = VOLUME_UNKNOWN;
 
@@ -78,9 +82,16 @@ void setup() {
   Serial.println(ssid);
   WiFi.begin(ssid, password);
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
+  for (int i = 0; i < 30 && wifiStatus != WL_CONNECTED; i++) {
+    wifiStatus = WiFi.status(); 
+    delay(500);
     Serial.print("@");
+  }
+
+  if (wifiStatus != WL_CONNECTED) {
+    Serial.println("");
+    Serial.println("[setup] Could not connect to WiFi");
+    return;
   }
 
   Serial.println("");
@@ -88,16 +99,51 @@ void setup() {
   Serial.println(WiFi.localIP());
   // turn off the LED. commands seems to be inverted
   digitalWrite(LED_BUILTIN, HIGH);
+
+  // Initialize mDNS with the device name "Devialet IR"
+  MDNS.begin("Devialet IR");
+
+  // Tries 10 times to get the IP of the devialet
+  for (u16_t i = 0; i < 10 && devialetIP == ""; i++)
+  {
+    Serial.println("[devialet_api] Try " + String(i) + "/" + String(10));
+    digitalWrite(LED_BUILTIN, LOW);
+    devialetIP = getDevialetIP();
+    digitalWrite(LED_BUILTIN, HIGH);
+    delay(500);
+  }
+
+  if (devialetIP == "") {
+    Serial.println("[devialet_api] Could not find the Devialet IP");
+  } else {
+    Serial.println("[devialet_api] Found Devialet at " + devialetIP);
+  }
 }
 
-
 void loop() {
+  if (wifiStatus != WL_CONNECTED) {
+    // Flash if WiFi is not connected (100ms OFF / 100ms ON)
+    Serial.println("[loop] WiFi not connected " + String(wifiStatus));
+    digitalWrite(LED_BUILTIN, millis() % 200 > 100);
+    // wait for a delay short enough to not be visible in th blinking pattern
+    // but long enough to not overload the CPU
+    delay(10);
+    return;
+  }
+  if (devialetIP == "") {
+    // Flash if the Devialet IP is not found (400ms OFF / 100ms ON)
+    digitalWrite(LED_BUILTIN, millis() % 500 > 100);
+    // wait for a delay short enough to not be visible in th blinking pattern
+    // but long enough to not overload the CPU
+    delay(10);
+    return;
+  }
 
   // Check if an IR signal is received
   if (!irrecv.decode(&results)) {
     // Zone out for a bit if no signal has been received
     Serial.print(".");
-    delay(300);
+    delay(100);
     return;
   }
 
@@ -119,6 +165,6 @@ void loop() {
    return;
   }
 
-  controlDevialetVolume(command);
+  controlDevialetVolume(devialetIP, command);
   last_command = command;
 }
