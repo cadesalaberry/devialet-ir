@@ -31,7 +31,7 @@ Here is what devices were used for the project:
 - [IR Receiver](https://www.amazon.fr/dp/B07ZYZDW28) used for the build.
 
 <p align="center">
-  <img src="./docs/KY-022.jpg"></img>
+  <img src="./docs/KY-022.jpg" width="50%"></img>
 </p>
 
 ## Start the project
