@@ -1,0 +1,25 @@
+# Example Home Assistant automation for when "Direct speaker control" is OFF:
+# the remote's key presses are handled by HA through the built-in Devialet integration.
+# Adjust the two entity IDs to match your setup.
+alias: Devialet IR remote
+mode: queued
+triggers:
+  - trigger: state
+    entity_id: event.devialet_ir_ir_command
+    not_from: unavailable
+actions:
+  - choose:
+      - conditions: "{{ trigger.to_state.attributes.event_type == 'volume_up' }}"
+        sequence:
+          - action: media_player.volume_up
+            target: { entity_id: media_player.phantom }
+      - conditions: "{{ trigger.to_state.attributes.event_type == 'volume_down' }}"
+        sequence:
+          - action: media_player.volume_down
+            target: { entity_id: media_player.phantom }
+      - conditions: "{{ trigger.to_state.attributes.event_type == 'mute' }}"
+        sequence:
+          - action: media_player.volume_mute
+            target: { entity_id: media_player.phantom }
+            data:
+              is_volume_muted: "{{ not state_attr('media_player.phantom', 'is_volume_muted') }}"

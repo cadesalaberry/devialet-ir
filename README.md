@@ -6,7 +6,7 @@ An ESP32 IR receiver to control the volume of Devialet speakers.
   <img src="./docs/devialet-phantom-ii.gif"></img>
 </p>
 
-This project uses a IR Sensor to convert the IR signals of a remote to the following http post request:
+This project uses an IR sensor to turn the volume keys of a remote into [Devialet IP Control](./Devialet%20IP%20Control%20-%20R1.pdf) requests, and exposes every key press to Home Assistant:
 
 ```
 GET http://{DEVIALET_IP}/ipcontrol/v1/systems/current/sources/current/soundControl/volume
@@ -34,42 +34,52 @@ Here is what devices were used for the project:
   <img src="./docs/KY-022.jpg" width="50%"></img>
 </p>
 
-## Start the project
+## Firmware
 
-- Clone the repo
-- Open the `devialet-ir.code-workspace` with VSCode
-- It will suggest you to install platformIO, do so
-- While it installs, Connect the IR receiver to the board. The S (Signal) pin should go to D10 on the board, the middle pin to the 3v3, and the I pin to the GND (Ground)
-- Connect the ESP32C6 Board to your computer with a USB-C cable
-- The PlatformIO should now be installed
-- A new tab will appear on the left bar with an alien face
-- From that menu you will be able to `Upload and Monitor` the firmware
-- edit the `src/secrets.hpp` file to enter your wifi credentials
+The firmware is an [ESPHome](https://esphome.io) configuration: [`esphome/devialet-ir.yaml`](./esphome/devialet-ir.yaml).
+The original Arduino/PlatformIO firmware (`src/`, `platformio.ini`) is kept for reference but is no longer maintained.
 
-> Sometimes the board refused to be flashed. To fix it I had to:
->
-> - disconnect from power/computer
-> - stay pressed on the tiny B button next to the USB-C connector
-> - while still pressed reconnect to the computer
+### Wiring
+
+Connect the KY-022 IR receiver to the board: the **S** (signal) pin to **D10**, the middle pin to **3V3**, and the **-** pin to **GND**.
 
 ![image of the esp32-c6 board](./docs/xiao-esp32c6.png)
 
-## Boot sequence
+### Flashing
 
-- The yellow light stays ON until it is connected
-- The device tries to connect to the wifi for 15s
-- Once connected to the wifi, the yellow light turns off
-- It then looks for the IP address of the Phantom Speaker
-- The yellow light will turn on on each try
-- After 10 tries, it will stop looking and blink with an error pattern if there is one
-- If everything went well, the yellow light will turn off
-
-## Blinking light error pattern
-
+```sh
+pip install esphome
+cd esphome
+cp secrets.example.yaml secrets.yaml   # fill in Wi-Fi and keys (openssl rand -base64 32)
+esphome run devialet-ir.yaml           # first time over USB-C, then over Wi-Fi (OTA)
 ```
-# Short flashes every 0.1s (0.1s OFF - 0.1s ON)
-The device was unable to connect to the wifi
-=============
-# Short flashes every 0.4s (0.4s OFF - 0.1s ON)
-There was an error starting the network discovery to get the IP address of the Phantom Speaker
-```
+
+Set `speaker_address` in the `substitutions:` block to the IP of your Phantom (reserve its DHCP lease), or change it later from Home Assistant.
+
+> If the board refuses to be flashed: unplug it, hold the tiny **B** button next to the USB-C connector, and plug it back in while holding.
+
+If the device can't join your Wi-Fi it opens a `Devialet-IR Fallback` hotspot where you can enter new credentials.
+
+## Home Assistant
+
+The device is discovered automatically (Settings → Devices & services → ESPHome). It exposes:
+
+| Entity | Purpose |
+| --- | --- |
+| `event.devialet_ir_ir_command` | Fires `volume_up`, `volume_down` or `mute` on each key press; use it to trigger any automation |
+| `switch.devialet_ir_direct_speaker_control` | ON: the ESP drives the speaker itself (still works when HA is down). OFF: only the event fires |
+| `text.devialet_ir_speaker_address` | IP/host of the Phantom used for direct control |
+| `sensor.devialet_ir_last_ir_code` | Last decoded NEC code, handy to map another remote |
+
+Also add the built-in **Devialet** integration in Home Assistant to get the Phantom as a media player.
+To let Home Assistant handle the keys instead of the ESP, turn the direct control switch off and use
+[`esphome/home-assistant-automation.example.yaml`](./esphome/home-assistant-automation.example.yaml).
+
+### Using another remote
+
+Set `dump: all` under `remote_receiver:`, press the keys, read the codes in `esphome logs devialet-ir.yaml`
+(or the *Last IR code* sensor), and update the `switch (x.command)` block in `on_nec`.
+
+## LED
+
+The yellow LED is ESPHome's status LED: it blinks slowly on warnings (e.g. Wi-Fi or Home Assistant not connected) and fast on errors, and stays off when everything is fine.
