@@ -13,9 +13,12 @@ substitutions:
   friendly_name: Devialet IR
   # Pre-filled speaker address; it can be changed later from Home Assistant.
   # Reserve a DHCP lease for the Phantom so this stays valid.
-  speaker_address: "192.168.1.20"
+  speaker_address: "192.168.1.32"
   # Volume change per key press, in percent (the speaker's own volumeUp/Down step is 5).
   volume_step: "2"
+  # Holding a key: wait this long before repeating, then repeat at most this often
+  hold_delay_ms: "400"
+  hold_interval_ms: "200"
   # D10 on the XIAO ESP32-C6
   ir_pin: GPIO18
   # Yellow user LED, active low
@@ -65,7 +68,18 @@ globals:
     type: std::string
     restore_value: false
     initial_value: '""'
+  # Time of the last frame (full or repeat) for the current key
   - id: last_command_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  # Time of the full frame that started the current key press
+  - id: press_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  # Time of the last step triggered by holding the key
+  - id: last_replay_ms
     type: uint32_t
     restore_value: false
     initial_value: "0"
@@ -173,21 +187,27 @@ remote_receiver:
             default: return;
           }
           id(last_command) = cmd;
-          id(last_command_ms) = millis();
+          id(last_command_ms) = id(press_start_ms) = millis();
           id(handle_command).execute(cmd);
 
   # NEC "key held" repeat frame: 9ms mark, 2.25ms space, 560us mark.
   # ESPHome doesn't decode it, so match it here and replay the last volume key.
+  # The LG remote sends a repeat frame even on a short tap, so only treat it as a
+  # hold after a delay, and throttle steps (frames can arrive in bursts while an
+  # HTTP request blocks the main loop).
   on_raw:
     then:
       - lambda: |-
           if (x.size() < 3 || x.size() > 4) return;
           if (abs(x[0] - 9000) > 1500 || abs(-x[1] - 2250) > 600) return;
           uint32_t now = millis();
-          // Only replay while the key is actually held (frames every ~108ms)
-          if (id(last_command).empty() || now - id(last_command_ms) > 250) return;
+          // Frames come every ~108ms while held; allow slack for loop blocking
+          if (id(last_command).empty() || now - id(last_command_ms) > 800) return;
           id(last_command_ms) = now;
           if (id(last_command) == "mute") return; // don't toggle mute on hold
+          if (now - id(press_start_ms) < ${hold_delay_ms}) return;
+          if (now - id(last_replay_ms) < ${hold_interval_ms}) return;
+          id(last_replay_ms) = now;
           id(handle_command).execute(id(last_command));
 
 script:
@@ -272,6 +292,8 @@ script:
                     id(currently_muted) = root["muteState"] == "muted";
                     return true;
                   });
+                  ESP_LOGI("devialet", "Speaker is %s -> %s", id(currently_muted) ? "muted" : "unmuted",
+                           id(currently_muted) ? "unmuting" : "muting");
       - http_request.post:
           url: !lambda |-
             return "http://" + id(speaker_ip).state + "/ipcontrol/v1/groups/current/sources/current/playback/" +
