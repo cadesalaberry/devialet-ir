@@ -1,3 +1,6 @@
+// DEPRECATED: the Arduino/PlatformIO firmware is no longer maintained.
+// The project now uses ESPHome (esphome/devialet-ir.yaml). See README.md and README.arduino.md.
+
 #include <ESPmDNS.h>
 
 #define VOLUME_UP 1

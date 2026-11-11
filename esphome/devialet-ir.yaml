@@ -1,0 +1,330 @@
+# Devialet IR — ESPHome firmware for the Seeed XIAO ESP32-C6 + KY-022 IR receiver.
+#
+# - Decodes the LG TV remote volume keys (NEC protocol).
+# - Exposes every key press to Home Assistant as an `event` entity.
+# - Optionally drives the Phantom directly over Devialet IP Control, so the
+#   remote keeps working even when Home Assistant is down.
+#
+# Flash:   esphome run esphome/devialet-ir.yaml
+# Secrets: copy esphome/secrets.example.yaml to esphome/secrets.yaml
+
+substitutions:
+  name: devialet-ir
+  friendly_name: Devialet IR
+  # Pre-filled speaker address; it can be changed later from Home Assistant.
+  # Reserve a DHCP lease for the Phantom so this stays valid.
+  speaker_address: "192.168.1.32"
+  # Volume change per key press, in percent (the speaker's own volumeUp/Down step is 5).
+  volume_step: "2"
+  # Holding a key: wait this long before repeating, then repeat at most this often
+  hold_delay_ms: "400"
+  hold_interval_ms: "200"
+  # D10 on the XIAO ESP32-C6
+  ir_pin: GPIO18
+  # Yellow user LED, active low
+  led_pin: GPIO15
+
+esphome:
+  name: ${name}
+  friendly_name: ${friendly_name}
+  project:
+    name: cadesalaberry.devialet-ir
+    version: "2.0.0"
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # Don't reboot when Home Assistant is away: direct control must keep working without it
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret api_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Fallback hotspot if the Wi-Fi above can't be joined
+  ap:
+    ssid: "Devialet-IR Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+http_request:
+  verify_ssl: false
+  timeout: 2s
+
+globals:
+  # Last recognised command, replayed when the remote sends NEC repeat frames
+  - id: last_command
+    type: std::string
+    restore_value: false
+    initial_value: '""'
+  # Time of the last frame (full or repeat) for the current key
+  - id: last_command_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  # Time of the full frame that started the current key press
+  - id: press_start_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  # Time of the last step triggered by holding the key
+  - id: last_replay_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: target_volume
+    type: int
+    restore_value: false
+    initial_value: "-1"
+  # Mute state read from the speaker: -1 unknown, 0 unmuted, 1 muted
+  - id: mute_state
+    type: int
+    restore_value: false
+    initial_value: "-1"
+
+# --- XIAO ESP32-C6 RF switch: GPIO3 low enables it, GPIO14 low selects the on-board antenna.
+# (The Arduino core did this implicitly; ESPHome needs it explicitly.)
+switch:
+  - platform: gpio
+    id: rf_switch_enable
+    pin: GPIO3
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: gpio
+    id: rf_antenna_select
+    pin: GPIO14
+    restore_mode: ALWAYS_OFF
+    internal: true
+
+  # When ON, the ESP talks to the speaker itself. Turn OFF to let Home Assistant
+  # automations react to the `IR command` event instead.
+  - platform: template
+    id: direct_control
+    name: Direct speaker control
+    icon: mdi:speaker-wireless
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+text:
+  - platform: template
+    id: speaker_ip
+    name: Speaker address
+    icon: mdi:ip-network
+    mode: text
+    optimistic: true
+    restore_value: true
+    initial_value: ${speaker_address}
+    entity_category: config
+
+status_led:
+  pin:
+    number: ${led_pin}
+    inverted: true
+
+event:
+  - platform: template
+    id: ir_event
+    name: IR command
+    icon: mdi:remote
+    event_types:
+      - volume_up
+      - volume_down
+      - mute
+
+sensor:
+  - platform: wifi_signal
+    name: Wi-Fi signal
+    update_interval: 60s
+    entity_category: diagnostic
+
+text_sensor:
+  - platform: template
+    id: last_ir_code
+    name: Last IR code
+    icon: mdi:remote
+    entity_category: diagnostic
+
+remote_receiver:
+  pin:
+    number: ${ir_pin}
+    inverted: true # KY-022 output is active low
+    mode:
+      input: true
+      pullup: true
+  # Set to `all` to discover the codes of another remote in the logs
+  dump: nec
+  tolerance: 25%
+  idle: 10ms
+  filter: 50us
+
+  on_nec:
+    then:
+      - lambda: |-
+          char buf[32];
+          snprintf(buf, sizeof(buf), "NEC 0x%04X/0x%04X", x.address, x.command);
+          id(last_ir_code).publish_state(buf);
+
+          // LG TV remote (address 0xFB04). These are the same keys as the
+          // LG 32-bit codes 0x20DF40BF / 0x20DFC03F / 0x20DF906F, in ESPHome's
+          // LSB-first NEC representation.
+          // Any full frame ends the previous key press, so repeat frames of an
+          // unrelated key can't replay it.
+          id(last_command) = "";
+          if (x.address != 0xFB04) return;
+          std::string cmd;
+          switch (x.command) {
+            case 0xFD02: cmd = "volume_up"; break;
+            case 0xFC03: cmd = "volume_down"; break;
+            case 0xF609: cmd = "mute"; break;
+            default: return;
+          }
+          id(last_command) = cmd;
+          id(last_command_ms) = id(press_start_ms) = millis();
+          id(handle_command).execute(cmd);
+
+  # NEC "key held" repeat frame: 9ms mark, 2.25ms space, 560us mark.
+  # ESPHome doesn't decode it, so match it here and replay the last volume key.
+  # The LG remote sends a repeat frame even on a short tap, so only treat it as a
+  # hold after a delay, and throttle steps (frames can arrive in bursts while an
+  # HTTP request blocks the main loop).
+  on_raw:
+    then:
+      - lambda: |-
+          if (x.size() < 3 || x.size() > 4) return;
+          if (abs(x[0] - 9000) > 1500 || abs(-x[1] - 2250) > 600) return;
+          uint32_t now = millis();
+          // Frames come every ~108ms while held; allow slack for loop blocking
+          if (id(last_command).empty() || now - id(last_command_ms) > 800) return;
+          id(last_command_ms) = now;
+          if (id(last_command) == "mute") return; // don't toggle mute on hold
+          if (now - id(press_start_ms) < ${hold_delay_ms}) return;
+          if (now - id(last_replay_ms) < ${hold_interval_ms}) return;
+          id(last_replay_ms) = now;
+          id(handle_command).execute(id(last_command));
+
+script:
+  - id: handle_command
+    mode: single # presses arriving while an HTTP call is in flight are dropped
+    parameters:
+      cmd: std::string
+    then:
+      - event.trigger:
+          id: ir_event
+          event_type: !lambda return cmd;
+      - if:
+          condition:
+            switch.is_on: direct_control
+          then:
+            - if:
+                condition:
+                  lambda: return cmd == "mute";
+                then:
+                  - script.execute: toggle_mute
+                  - script.wait: toggle_mute
+                else:
+                  - script.execute:
+                      id: change_volume
+                      delta: !lambda 'return cmd == "volume_up" ? ${volume_step} : -${volume_step};'
+                  - script.wait: change_volume
+
+  - id: change_volume
+    mode: single
+    parameters:
+      delta: int
+    then:
+      - lambda: id(target_volume) = -1;
+      - http_request.get:
+          url: !lambda 'return "http://" + id(speaker_ip).state + "/ipcontrol/v1/systems/current/sources/current/soundControl/volume";'
+          capture_response: true
+          max_response_buffer_size: 256
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    ESP_LOGW("devialet", "Could not read volume: HTTP %d", response->status_code);
+                    return;
+                  }
+                  json::parse_json(body, [delta](JsonObject root) -> bool {
+                    if (!root["volume"].is<int>()) return false;
+                    int current = root["volume"];
+                    id(target_volume) = clamp(current + delta, 0, 100);
+                    ESP_LOGI("devialet", "Volume %d -> %d", current, id(target_volume));
+                    return true;
+                  });
+          on_error:
+            then:
+              - logger.log:
+                  level: WARN
+                  format: "Speaker unreachable at %s"
+                  args: ["id(speaker_ip).state.c_str()"]
+      - if:
+          condition:
+            lambda: return id(target_volume) >= 0;
+          then:
+            - http_request.post:
+                url: !lambda 'return "http://" + id(speaker_ip).state + "/ipcontrol/v1/systems/current/sources/current/soundControl/volume";'
+                request_headers:
+                  Content-Type: application/json
+                # Built by hand: the `json:` option would send the volume as a string
+                body: !lambda 'return "{\"volume\":" + to_string(id(target_volume)) + "}";'
+
+  - id: toggle_mute
+    mode: single
+    then:
+      - lambda: id(mute_state) = -1;
+      - http_request.get:
+          url: !lambda 'return "http://" + id(speaker_ip).state + "/ipcontrol/v1/groups/current/sources/current";'
+          capture_response: true
+          max_response_buffer_size: 2048
+          on_response:
+            then:
+              - lambda: |-
+                  if (response->status_code != 200) {
+                    ESP_LOGW("devialet", "Could not read mute state: HTTP %d", response->status_code);
+                    return;
+                  }
+                  // Devialet can report errors with HTTP 200, so require a known muteState
+                  bool ok = json::parse_json(body, [](JsonObject root) -> bool {
+                    const char *state = root["muteState"] | "";
+                    if (strcmp(state, "muted") == 0) id(mute_state) = 1;
+                    else if (strcmp(state, "unmuted") == 0) id(mute_state) = 0;
+                    else return false;
+                    return true;
+                  });
+                  if (!ok) {
+                    ESP_LOGW("devialet", "Unexpected mute state response: %s", body.c_str());
+                    return;
+                  }
+                  ESP_LOGI("devialet", "Speaker is %s -> %s", id(mute_state) ? "muted" : "unmuted",
+                           id(mute_state) ? "unmuting" : "muting");
+          on_error:
+            then:
+              - logger.log:
+                  level: WARN
+                  format: "Speaker unreachable at %s"
+                  args: ["id(speaker_ip).state.c_str()"]
+      - if:
+          condition:
+            lambda: return id(mute_state) >= 0;
+          then:
+            - http_request.post:
+                url: !lambda |-
+                  return "http://" + id(speaker_ip).state + "/ipcontrol/v1/groups/current/sources/current/playback/" +
+                         (id(mute_state) == 1 ? "unmute" : "mute");
+                request_headers:
+                  Content-Type: application/json
+                body: "{}"
