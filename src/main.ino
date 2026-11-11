@@ -1,3 +1,6 @@
+// DEPRECATED: the Arduino/PlatformIO firmware is no longer maintained.
+// The project now uses ESPHome (esphome/devialet-ir.yaml). See README.md and README.arduino.md.
+
 #define DECODE_LG 1
 #define DECODE_NEC 1         // Includes Apple and Onkyo
 
