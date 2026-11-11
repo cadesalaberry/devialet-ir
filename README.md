@@ -51,14 +51,15 @@ Connect the KY-022: **S** (signal) to **D10**, the middle pin to **3V3**, and **
 
 ## Flashing
 
+Before flashing, set `speaker_address` in the `substitutions:` block of `devialet-ir.yaml` to the IP of your Phantom.
+It is only the default: after flashing, change it from Home Assistant (*Speaker address*), or edit the substitution and run `esphome run` again.
+
 ```sh
 pip install esphome
 cd esphome
 cp secrets.example.yaml secrets.yaml   # fill in Wi-Fi and keys (openssl rand -base64 32)
 esphome run devialet-ir.yaml           # first time over USB-C, then over Wi-Fi
 ```
-
-Set `speaker_address` in the `substitutions:` block to the IP of your Phantom, or change it later from Home Assistant.
 
 > If the board refuses to be flashed: unplug it, hold the tiny **B** button next to the USB-C connector, and plug it back in while holding.
 >
@@ -88,7 +89,7 @@ To let Home Assistant handle the keys instead of the ESP, turn the direct contro
 
 ### Using another remote
 
-Set `dump: all` under `remote_receiver:`, press the keys, read the codes in `esphome logs devialet-ir.yaml` (or the *Last IR code* sensor), and update the `switch (x.command)` block in `on_nec`.
+Set `dump: all` under `remote_receiver:`, press the keys, read the codes in `esphome logs devialet-ir.yaml` (or the *Last IR code* sensor), and update `on_nec`: the `x.address != 0xFB04` guard if your remote uses another NEC address, and the `switch (x.command)` cases.
 
 ## LED
 
